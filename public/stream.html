@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC Stream</title>
+</head>
+<body>
+  <video id="localVideo" autoplay playsinline muted></video>
+
+  <script>
+    const localVideo = document.getElementById('localVideo');
+
+    // Get user media (video and audio) using WebRTC
+    async function getUserMedia() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        localVideo.srcObject = stream;
+        sendMediaToSFUServer(stream);
+      } catch (error) {
+        console.error('Error accessing media devices:', error);
+      }
+    }
+
+    // Send media streams to the SFU server using WebRTC
+    function sendMediaToSFUServer(stream) {
+      const socket = new WebSocket('ws://localhost:3000');
+
+      socket.onopen = () => {
+        console.log('WebSocket connection established.');
+
+        // Send a 'join' event to the SFU server
+        socket.send(JSON.stringify({ event: 'join' }));
+      };
+
+      socket.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+
+        switch (msg.event) {
+          case 'transportOptions':
+            handleTransportOptions(socket, msg.transportOptions, stream);
+            break;
+          case 'answer':
+            handleAnswer(socket, msg);
+            break;
+          default:
+            console.warn('Unknown message event:', msg.event);
+            break;
+        }
+      };
+
+      const handleTransportOptions = async (socket, transportOptions, stream) => {
+        const pc = new RTCPeerConnection({
+          iceServers: transportOptions.iceParameters.iceServers,
+        });
+
+        // Add the local media stream to the RTCPeerConnection
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+        // Create an SDP offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Send the SDP offer to the SFU server
+        socket.send(JSON.stringify({
+          event: 'offer',
+          sdpOffer: pc.localDescription,
+          transportId: transportOptions.id,
+        }));
+
+        // Handle ICE candidates
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            socket.send(JSON.stringify({
+              event: 'iceCandidate',
+              transportId: transportOptions.id,
+              iceCandidate: event.candidate,
+            }));
+          }
+        };
+
+        // Set the remote SDP answer received from the SFU server
+        const answer = new RTCSessionDescription(msg.sdpAnswer);
+        await pc.setRemoteDescription(answer);
+      };
+
+      const handleAnswer = async (socket, msg) => {
+        // Set the remote SDP answer received from the SFU server
+        const pc = new RTCPeerConnection({ iceServers: [] });
+        const answer = new RTCSessionDescription(msg.sdpAnswer);
+        await pc.setRemoteDescription(answer);
+
+        // Handle ICE candidates
+        pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            socket.send(JSON.stringify({
+              event: 'iceCandidate',
+              transportId: msg.transportId,
+              iceCandidate: event.candidate,
+            }));
+          }
+        };
+      };
+
+      return () => {
+        socket.close();
+      };
+    }
+
+    // Call the getUserMedia function when the page loads
+    window.onload = () => {
+      getUserMedia();
+    };
+  </script>
+</body>
+</html>
